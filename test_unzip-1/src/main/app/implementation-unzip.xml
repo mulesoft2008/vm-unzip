@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:db="http://www.mulesoft.org/schema/mule/db"
+        xmlns:scripting="http://www.mulesoft.org/schema/mule/scripting"
+        xmlns:file="http://www.mulesoft.org/schema/mule/file"
+        xmlns:encryption="http://www.mulesoft.org/schema/mule/encryption"
+        xmlns:vm="http://www.mulesoft.org/schema/mule/vm"
+        xmlns:tracking="http://www.mulesoft.org/schema/mule/ee/tracking"
+        xmlns="http://www.mulesoft.org/schema/mule/core"
+        xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+        xmlns:spring="http://www.springframework.org/schema/beans"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+http://www.mulesoft.org/schema/mule/scripting http://www.mulesoft.org/schema/mule/scripting/current/mule-scripting.xsd
+http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd
+http://www.mulesoft.org/schema/mule/encryption http://www.mulesoft.org/schema/mule/encryption/current/mule-encryption.xsd
+http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd
+http://www.mulesoft.org/schema/mule/ee/tracking http://www.mulesoft.org/schema/mule/ee/tracking/current/mule-tracking-ee.xsd">
+
+    <file:connector name="sfg_test_unzip_input_file" outputPattern="#[message.inboundProperties.originalFilename].#[message.id]" autoDelete="true" streaming="true" validateConnections="true" fileAge="5000" doc:name="Input File"/>
+    <file:connector name="sfg_test_unzip_output_file" streaming="true" validateConnections="true" fileAge="5000" doc:name="Output File"/>
+
+    <vm:connector name="sfg.unzip.step2.queue" doc:name="Step2 VM" queueTimeout="100000" validateConnections="true">
+        <vm:queue-profile>
+        </vm:queue-profile>
+    </vm:connector>
+    <vm:connector name="sfg.gl_out.step3.queue" doc:name="Step3 VM"/>
+    <vm:connector name="sfg.gl_out.step4.queue" doc:name="Step4 VM"/>
+    <vm:connector name="sfg.common.status.queue" validateConnections="true" doc:name="VM"/>
+    <vm:connector name="sfg.common.transfer.queue" validateConnections="true" doc:name="VM"/>
+
+    <!-- Wait for the file, take a backup, send the message details to the queue and update the status -->
+    <flow name="sfg_unzip_step1_flow">
+        <file:inbound-endpoint path="${sfg_test_unzip_step1_inbox_live}" moveToPattern="#[message.inboundProperties.originalFilename].#[message.id]" moveToDirectory="${sfg_test_unzip_step1_inbox_backup}" connector-ref="sfg_test_unzip_input_file" fileAge="5000" responseTimeout="10000" doc:name="Vendor Drop Off Input File" tracking:enable-default-events="true">
+            <file:filename-regex-filter pattern="(.*)" caseSensitive="true"/>
+        </file:inbound-endpoint>
+        <set-variable variableName="originalFilename" value="#[message.inboundProperties.originalFilename]" doc:name="Store Filename"/>
+        <set-variable variableName="id" value="#[message.id]" doc:name="Store ID"/>
+        <set-session-variable variableName="stagingName" value="#[message.inboundProperties.originalFilename].#[message.id]" doc:name="stagingName"/>
+        <vm:outbound-endpoint exchange-pattern="one-way" path="sfg.unzip.step2.queue" connector-ref="sfg.unzip.step2.queue" doc:name="Send to Step 2 Unzip queue"/>
+
+        <set-property propertyName="status_step" value="sfg_test_unzip_step1" doc:name="Status Step"/>
+        <set-property propertyName="status_value" value="1" doc:name="Status Value"/>
+        <set-property propertyName="status_xfer_id" value="#[message.id]" doc:name="Status XFER ID"/>
+        <vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.status.queue" connector-ref="sfg.common.status.queue" doc:name="Update status"/>
+
+        <set-property propertyName="xfer_status" value="0" doc:name="Transfer Step"/>
+        <set-property propertyName="origName" value="#[message.inboundProperties.originalFilename]" doc:name="Status Value"/>
+        <set-property propertyName="xfer_id" value="#[message.id]" doc:name="Status XFER ID"/>
+        <vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.transfer.queue" connector-ref="sfg.common.transfer.queue" doc:name="Add transfer"/>
+        
+        <exception-strategy ref="unzip_exception_handlerCatch_Exception_Strategy-for-sfg_unzip_step1_flow" doc:name="Exception Handler"/>
+    </flow>
+
+    <!-- Decrypt the file using PGP, stage for iShare, update the status  -->
+    <flow name="sfg_unzip_step2_flow">
+        <vm:inbound-endpoint exchange-pattern="one-way" path="sfg.unzip.step2.queue" connector-ref="sfg.unzip.step2.queue" doc:name="Unzip File"/>
+
+        <set-variable variableName="stagingPath" value="${sfg_test_unzip_step1_inbox_backup}" doc:name="stagingPath Variable"/>
+           <custom-transformer class="com.mule.zip.UnzipTransformer" doc:name="Java"/>
+                <file:outbound-endpoint path="${sfg_test_unzip_step1_inbox_output}" outputPattern="#[sessionVars.stagingName]" connector-ref="sfg_test_unzip_output_file" responseTimeout="10000" doc:name="Destination"/>
+
+        <set-property propertyName="status_step" value="sfg_test_unzip_step2" doc:name="Status Step"/>
+        <set-property propertyName="status_value" value="1" doc:name="Status Value"/>
+        <set-property propertyName="status_xfer_id" value="#[message.id]" doc:name="Status XFER ID"/>
+        <vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.status.queue" connector-ref="sfg.common.status.queue" doc:name="Update status"/>
+        
+        <exception-strategy ref="unzip_exception_handlerCatch_Exception_Strategy-for-sfg_unzip_step2_flow" doc:name="Exception Handler"/>
+    </flow>
+
+    <!--  Send the raw file to iShare1 using ConnectDirect, update the status -->
+
+    <!--  Send the raw file to iShare2 using ConnectDirect, update the status -->
+
+</mule>
